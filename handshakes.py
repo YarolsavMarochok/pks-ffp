@@ -1,6 +1,5 @@
 import socket  # Ensure socket is imported
 import struct
-import zlib
 from config import PEER1_PORT, PEER2_IP, PEER2_PORT
 from socket_utilities import pack_message
 
@@ -13,7 +12,7 @@ def three_way_handshake(sock, send_sock):
 
     print("Initiating three-way handshake")
     send_sock.sendto(b"SYN_1", (PEER2_IP, PEER2_PORT))
-    print("First SYN was sent")
+    print("First SYN was sent") 
 
     while state != 'CONNECTED':
         try:

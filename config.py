@@ -9,3 +9,4 @@ def initialize_sockets():
     send_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.settimeout(2)
     return sock, send_sock
+ 
