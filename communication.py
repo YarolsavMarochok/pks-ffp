@@ -1,9 +1,11 @@
 import socket
 import struct
+import time
 from handshakes import four_way_handshake
-from socket_utilities import pack_message, checksum_calculator
+from socket_utilities import pack_message, pack_file, checksum_calculator
 from config import PEER1_PORT, PEER2_PORT, PEER2_IP
- 
+import os
+
 terminate = False
 fourway_hs = 0
 
@@ -47,12 +49,23 @@ def receive_messages(sock, send_sock):
     while not terminate:
         try:
             full_packet, sender_address = sock.recvfrom(2048)
-            header = struct.unpack("!IIIIII", full_packet[:24])
-            message_fragment = full_packet[24:]
+            header = struct.unpack("!IIIIIII", full_packet[:28])
 
             sender_port = header[0]
             sequence_number = header[4]
             total_fragments = header[5]
+            file_indicator = header[6]
+
+            if file_indicator == 1:
+                name_len = struct.unpack("!H", full_packet[28:30])[0]
+                file_name = struct.unpack(f"!{name_len}s", full_packet[30:30+name_len])[0].decode()
+                ext_len = struct.unpack("!H", full_packet[30+name_len:32+name_len])[0]
+                file_extension = struct.unpack(f"!{ext_len}s", full_packet[32+name_len:32+name_len+ext_len])[0].decode()
+
+                message_fragment = full_packet[32 + name_len + ext_len:]
+            else:
+                message_fragment = full_packet[28:]
+
 
             # Validate checksum
             checksum = checksum_calculator(message_fragment)
@@ -60,59 +73,103 @@ def receive_messages(sock, send_sock):
                 print("ERROR: Data corrupted")
                 continue
 
-            print(f"Fragment {round(sequence_number + 1 / total_fragments)} content: {message_fragment.decode(errors='ignore')}")
 
             # Store fragment
             if sender_address not in message_fragments:
                 message_fragments[sender_address] = {}
             message_fragments[sender_address][sequence_number] = message_fragment
 
-            # Check if all fragments are received
-            if len(message_fragments[sender_address]) == total_fragments:
-                full_message = b"".join(
-                    message_fragments[sender_address][i] for i in range(total_fragments)
-                )
-                print(f"Received complete message from {sender_port}: {full_message.decode()}")
-                del message_fragments[sender_address]  # Clear stored fragments
+            print(f"Received fragment {sequence_number + 1}/{total_fragments} from {sender_port}")
+
+
+
+            if file_indicator == 0:
+                
+                print(f"Fragment {round(sequence_number + 1 / total_fragments)} content: {message_fragment.decode(errors='ignore')}")
+
+                # Check if all fragments are received
+                if len(message_fragments[sender_address]) == total_fragments:
+                    full_message = b"".join(
+                        message_fragments[sender_address][i] for i in range(total_fragments)
+                    )
+                    print(f"Received complete message from {sender_port}: {full_message.decode()}")
+                    del message_fragments[sender_address]  # Clear stored fragments
+            
+            elif file_indicator == 1:
+                print("Checking on all fragments!")
+                # Checking if all fragments are received
+                if len(message_fragments[sender_address]) == total_fragments:
+                    print(f"All fragments received. Total: {total_fragments}")  # Debugging line
+
+                    # Ensure fragments are in order
+                    full_file_data = b"".join(
+                        message_fragments[sender_address][i] for i in range(total_fragments)
+                    )
+
+                    # Save the reassembled file
+                    output_file = f"{file_name}{file_extension}"
+
+                    if os.path.exists(output_file):
+                        print(f"File '{output_file}' already exists.")
+                        response = input(f"Do you want to overwrite it? (y/n): ").strip().lower()
+                        if response == 'y':
+                            with open(output_file, 'wb') as file:
+                                file.write(full_file_data)
+                            print(f"File overwritten and saved as {output_file}")
+                        else:
+                            new_name = input(f"Enter a new name for the file (default: {file_name}_new{file_extension}): ").strip()
+                            if not new_name:
+                                new_name = f"{file_name}_new{file_extension}"
+                            with open(new_name, 'wb') as file:
+                                file.write(full_file_data)
+                            print(f"File saved as {new_name}")
+                    else:
+                        with open(output_file, 'wb') as file:
+                            file.write(full_file_data)
+                        print(f"File received and saved as {output_file}")
+
+                    # Clear stored fragments for this sender
+                    del message_fragments[sender_address]  # Clear stored fragments
+                else:
+                    print(f"Waiting for more fragments... Current count: {len(message_fragments[sender_address])} / {total_fragments}")
+
+                    # del message_fragments[sender_address]  # Clear stored fragments
 
         except socket.timeout:
             continue
 
 
-# # Main function to receive messages
-# def receive_messages(sock, send_sock):
-#     global terminate, fourway_hs
-#     while not terminate:
-#         try:
-#             # Receiving the packet
-#             full_packet, sender_address = sock.recvfrom(1024)
-#             header = parse_header(full_packet[:16])
-            
-#             if header is None:
-#                 continue  # Skip this packet if the header parsing failed
-
-#             message = full_packet[16:]
-
-#             if not validate_checksum(message, header[3]):
-#                 continue  # Skip this packet if checksum validation failed
-
-#             message = message.decode()
-
-#             handle_message(message, sender_address, header)
-            
-#         except socket.timeout:
-#             continue
-
-# Function to send messages
 def send_messages(sock, send_sock, peer1_port, peer2_port):
-        while True:
-            try:
-                message = input("\nEnter message: ").encode()
-                fragments = pack_message(message, peer1_port, peer2_port)  # Get all fragments
+    while True:
+        try:
+            user_input = input("Enter /file to send a file or /message to send a text message: ").strip().lower()
+
+            if user_input == "/file":
+                # Ask for the file path
+                file_path = input("Enter the file path to send: ").strip()
+                fragments = pack_file(file_path, peer1_port, peer2_port)
+
+                if not fragments:
+                    print("No fragments were generated. Please check the file path.")
+                    continue
+
+                for fragment in fragments:
+                    sock.sendto(fragment, (PEER2_IP, peer2_port))  # Send each fragment
+                    print("Sent a fragment.")
+                    time.sleep(0.01)
+                print(f"Sent entire file in {len(fragments)} fragment(s).")
+
+            elif user_input == "/message":
+                message = input("Enter your message: ").encode()
+                fragments = pack_message(message, peer1_port, peer2_port)  # Get all fragments for message
 
                 for fragment in fragments:
                     sock.sendto(fragment, (PEER2_IP, peer2_port))  # Send each fragment
                     print("Sent a fragment.")
                 print(f"Sent entire message in {len(fragments)} fragment(s).")
-            except Exception as e:
-                print(f"Error while sending message: {e}")
+
+            else:
+                print("Invalid input. Please enter /file or /message.")
+        
+        except Exception as e:
+            print(f"Error while sending: {e}")
