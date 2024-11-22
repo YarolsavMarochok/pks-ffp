@@ -9,52 +9,59 @@ import os
 terminate = False
 ack_received = False
 fourway_hs = 0
+received_ack = set()
 
-def parse_header(header_data):
-    try:
-        # Unpacking header assuming it has 4 integers (each 4 bytes)
-        header = struct.unpack("!IIII", header_data[:16])  
-        return header
-    except Exception as e:
-        print(f"Error parsing header: {e}")
-        return None
 
-def validate_checksum(message, expected_checksum):
-    actual_checksum = checksum_calculator(message)
-    if actual_checksum != expected_checksum:
-        print("ERROR: Data corrupted")
-        return False
-    return True
+# def parse_header(header_data):
+#     try:
+#         # Unpacking header assuming it has 4 integers (each 4 bytes)
+#         header = struct.unpack("!IIII", header_data[:16])  
+#         return header
+#     except Exception as e:
+#         print(f"Error parsing header: {e}")
+#         return None
 
-def handle_message(message, sender_address, header):
-    global terminate, fourway_hs
+# def validate_checksum(message, expected_checksum):
+#     actual_checksum = checksum_calculator(message)
+#     if actual_checksum != expected_checksum:
+#         print("ERROR: Data corrupted")
+#         return False
+#     return True
 
-    # Handling "END" or "FIN" messages
-    if message == "END":
-        print("Received END, initiating four-way handshake")
-        four_way_handshake(sender_address)
-        terminate = True
-    elif message == "FIN":
-        print("Received FIN, responding with ACK")
-        four_way_handshake(sender_address)
-        terminate = True
+# def handle_message(message, sender_address, header):
+#     global terminate, fourway_hs
 
-    # Printing the message
-    print(f"Received from {header[1]}: {message}")
+#     # Handling "END" or "FIN" messages
+#     if message == "END":
+#         print("Received END, initiating four-way handshake")
+#         four_way_handshake(sender_address)
+#         terminate = True
+#     elif message == "FIN":
+#         print("Received FIN, responding with ACK")
+#         four_way_handshake(sender_address)
+#         terminate = True
+
+#     # Printing the message
+#     print(f"Received from {header[1]}: {message}")
 
 
 def receive_messages(sock, send_sock):
-    global terminate, ack_received
-    message_fragments = {}  # Store fragments for reassembly: {source: {seq: fragment}}
+    global terminate, ack_received, received_ack
+    message_fragments = {}
 
     while not terminate:
         try:
             full_packet, sender_address = sock.recvfrom(2048)
-            
-            if len(full_packet) < 28 :
-                print("Maybe it was ACK i dunno...")
+
+            # Handle ACKs
+            if len(full_packet) == 4:
+                ack_seq = struct.unpack("!I", full_packet)[0]
+                received_ack.add(ack_seq)
                 ack_received = True
+                print(f"ACK received for fragment {ack_seq + 1}")
                 continue
+
+
 
             header = struct.unpack("!IIIIIII", full_packet[:28])
 
@@ -116,7 +123,7 @@ def receive_messages(sock, send_sock):
                     )
 
                     # Save the reassembled file
-                    output_file = f"{file_name}{file_extension}"
+                    output_file = f"{file_name}{file_extension}" 
 
                     if os.path.exists(output_file):
                         print(f"File '{output_file}' already exists.")
@@ -147,6 +154,7 @@ def receive_messages(sock, send_sock):
         except socket.timeout:
             continue
 
+WINDOW_SIZE = 256  # Adjustable as per requirement
 
 def send_messages(sock, send_sock, peer1_port, peer2_port):
     global ack_received
@@ -171,24 +179,35 @@ def send_messages(sock, send_sock, peer1_port, peer2_port):
                 print("Invalid input. Please enter /file or /message.")
                 continue
 
-            for fragment in fragments:
-                print("Sent a fragment.")
-                sock.sendto(fragment, (PEER2_IP, peer2_port))  # Send each fragment
-                start_time = time.time()  # Record the start time for the timeout.
+            # Sliding window logic
+            base = 0
+            next_seq_num = 0
+            sent_time = {}
 
-                while not ack_received:
-                    # Check if 1 second has passed since the fragment was sent
-                    if time.time() - start_time >= 1.0:
-                        print("No ACK received within 1 second. Retransmitting fragment...")
-                        sock.sendto(fragment, (PEER2_IP, peer2_port))  # Retransmit the fragment
-                        start_time = time.time()  # Reset the start time
+            while base < len(fragments):
+                # Send packets within the window
+                while next_seq_num < base + WINDOW_SIZE and next_seq_num < len(fragments):
+                    sock.sendto(fragments[next_seq_num], (PEER2_IP, peer2_port))
+                    sent_time[next_seq_num] = time.time()
+                    print(f"Sent fragment {next_seq_num + 1}")
+                    next_seq_num += 1
 
-                    print("Waiting for an ACK...")
+                # Wait for ACKs and handle retransmissions
+                while base < next_seq_num:
+                    if base in received_ack:
+                        print(f"ACK received for fragment {base + 1}")
+                        base += 1  # Slide the window forward
+                    else:
+                        # Check for timeout
+                        current_time = time.time()
+                        for seq_num in range(base, next_seq_num):
+                            if current_time - sent_time[seq_num] > 1.0:  # Timeout
+                                print(f"Timeout: Resending fragment {seq_num + 1}")
+                                sock.sendto(fragments[seq_num], (PEER2_IP, peer2_port))
+                                sent_time[seq_num] = time.time()
+                    
                     time.sleep(0.01)  # Small delay to reduce CPU usage
-
-                # Reset the `ack_received` flag for the next fragment
-                ack_received = False
-
+            received_ack.clear()
             print(f"Sent entire data in {len(fragments)} fragment(s).")
 
         except Exception as e:
