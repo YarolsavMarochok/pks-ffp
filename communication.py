@@ -7,6 +7,7 @@ from config import PEER1_PORT, PEER2_PORT, PEER2_IP
 import os
 
 terminate = False
+ack_received = False
 fourway_hs = 0
 
 def parse_header(header_data):
@@ -43,12 +44,18 @@ def handle_message(message, sender_address, header):
 
 
 def receive_messages(sock, send_sock):
-    global terminate
+    global terminate, ack_received
     message_fragments = {}  # Store fragments for reassembly: {source: {seq: fragment}}
 
     while not terminate:
         try:
             full_packet, sender_address = sock.recvfrom(2048)
+            
+            if len(full_packet) < 28 :
+                print("Maybe it was ACK i dunno...")
+                ack_received = True
+                continue
+
             header = struct.unpack("!IIIIIII", full_packet[:28])
 
             sender_port = header[0]
@@ -73,6 +80,10 @@ def receive_messages(sock, send_sock):
                 print("ERROR: Data corrupted")
                 continue
 
+            print("Good fragment was received!")
+            ack_packet = struct.pack("!I", sequence_number)
+            send_sock.sendto(ack_packet, sender_address)
+            print(f"ACK sent for fragment {sequence_number + 1}")
 
             # Store fragment
             if sender_address not in message_fragments:
@@ -80,8 +91,6 @@ def receive_messages(sock, send_sock):
             message_fragments[sender_address][sequence_number] = message_fragment
 
             print(f"Received fragment {sequence_number + 1}/{total_fragments} from {sender_port}")
-
-
 
             if file_indicator == 0:
                 
@@ -140,6 +149,7 @@ def receive_messages(sock, send_sock):
 
 
 def send_messages(sock, send_sock, peer1_port, peer2_port):
+    global ack_received
     while True:
         try:
             user_input = input("Enter /file to send a file or /message to send a text message: ").strip().lower()
@@ -153,23 +163,33 @@ def send_messages(sock, send_sock, peer1_port, peer2_port):
                     print("No fragments were generated. Please check the file path.")
                     continue
 
-                for fragment in fragments:
-                    sock.sendto(fragment, (PEER2_IP, peer2_port))  # Send each fragment
-                    print("Sent a fragment.")
-                    time.sleep(0.01)
-                print(f"Sent entire file in {len(fragments)} fragment(s).")
-
             elif user_input == "/message":
                 message = input("Enter your message: ").encode()
                 fragments = pack_message(message, peer1_port, peer2_port)  # Get all fragments for message
 
-                for fragment in fragments:
-                    sock.sendto(fragment, (PEER2_IP, peer2_port))  # Send each fragment
-                    print("Sent a fragment.")
-                print(f"Sent entire message in {len(fragments)} fragment(s).")
-
             else:
                 print("Invalid input. Please enter /file or /message.")
-        
+                continue
+
+            for fragment in fragments:
+                print("Sent a fragment.")
+                sock.sendto(fragment, (PEER2_IP, peer2_port))  # Send each fragment
+                start_time = time.time()  # Record the start time for the timeout.
+
+                while not ack_received:
+                    # Check if 1 second has passed since the fragment was sent
+                    if time.time() - start_time >= 1.0:
+                        print("No ACK received within 1 second. Retransmitting fragment...")
+                        sock.sendto(fragment, (PEER2_IP, peer2_port))  # Retransmit the fragment
+                        start_time = time.time()  # Reset the start time
+
+                    print("Waiting for an ACK...")
+                    time.sleep(0.01)  # Small delay to reduce CPU usage
+
+                # Reset the `ack_received` flag for the next fragment
+                ack_received = False
+
+            print(f"Sent entire data in {len(fragments)} fragment(s).")
+
         except Exception as e:
             print(f"Error while sending: {e}")
