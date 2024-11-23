@@ -10,8 +10,9 @@ terminate = False
 ack_received = False
 fourway_hs = 0
 received_ack = set()
-
-
+stop_fucking_heartbeat = False
+connection_alive = False
+connection_state = 0
 # def parse_header(header_data):
 #     try:
 #         # Unpacking header assuming it has 4 integers (each 4 bytes)
@@ -46,12 +47,23 @@ received_ack = set()
 
 
 def receive_messages(sock, send_sock):
-    global terminate, ack_received, received_ack
+    global terminate, ack_received, received_ack, stop_fucking_heartbeat, connection_state
     message_fragments = {}
 
     while not terminate:
         try:
             full_packet, sender_address = sock.recvfrom(2048)
+
+            if full_packet == b'ACK-ALIVE':
+                print("CONNETCTION ALIVE SUKA!")
+                connection_alive = True
+                connection_state = 1
+                continue
+
+            if full_packet == b"KEEP_ALIVE":
+                # print("Receiving keep-alive msaasasasaa SASAT SASAAAAAAAAY SAYSAY")
+                send_sock.sendto(b"ACK-ALIVE", sender_address)
+                continue
 
             # Handle ACKs
             if len(full_packet) == 4:
@@ -61,7 +73,8 @@ def receive_messages(sock, send_sock):
                 print(f"ACK received for fragment {ack_seq + 1}")
                 continue
 
-
+            stop_fucking_heartbeat = True
+            # print("HEARTBEAT HAS BEEN CAHNGED to ", stop_fucking_heartbeat)
 
             header = struct.unpack("!IIIIIII", full_packet[:28])
 
@@ -110,12 +123,16 @@ def receive_messages(sock, send_sock):
                     )
                     print(f"Received complete message from {sender_port}: {full_message.decode()}")
                     del message_fragments[sender_address]  # Clear stored fragments
+                    stop_fucking_heartbeat = False
+                    # print("HEARTBEAT HAS BEEN CAHNGED to ", stop_fucking_heartbeat)
             
             elif file_indicator == 1:
                 print("Checking on all fragments!")
                 # Checking if all fragments are received
                 if len(message_fragments[sender_address]) == total_fragments:
                     print(f"All fragments received. Total: {total_fragments}")  # Debugging line
+                    stop_fucking_heartbeat = False
+                    # print("HEARTBEAT HAS BEEN CAHNGED to ", stop_fucking_heartbeat)
 
                     # Ensure fragments are in order
                     full_file_data = b"".join(
@@ -150,28 +167,37 @@ def receive_messages(sock, send_sock):
                     print(f"Waiting for more fragments... Current count: {len(message_fragments[sender_address])} / {total_fragments}")
 
                     # del message_fragments[sender_address]  # Clear stored fragments
-
         except socket.timeout:
             continue
 
 WINDOW_SIZE = 256  # Adjustable as per requirement
 
 def send_messages(sock, send_sock, peer1_port, peer2_port):
-    global ack_received
+    global ack_received, stop_fucking_heartbeat
     while True:
         try:
             user_input = input("Enter /file to send a file or /message to send a text message: ").strip().lower()
 
             if user_input == "/file":
                 # Ask for the file path
+                stop_fucking_heartbeat = True
+                # print("HEARTBEAT HAS BEEN CAHNGED to ", stop_fucking_heartbeat)
+
                 file_path = input("Enter the file path to send: ").strip()
+         
                 fragments = pack_file(file_path, peer1_port, peer2_port)
 
                 if not fragments:
                     print("No fragments were generated. Please check the file path.")
+                    stop_fucking_heartbeat = False
+                    # print("HEARTBEAT HAS BEEN CAHNGED to ", stop_fucking_heartbeat)
+
                     continue
 
             elif user_input == "/message":
+                stop_fucking_heartbeat = True
+                # print("HEARTBEAT HAS BEEN CAHNGED to ", stop_fucking_heartbeat)
+
                 message = input("Enter your message: ").encode()
                 fragments = pack_message(message, peer1_port, peer2_port)  # Get all fragments for message
 
@@ -183,7 +209,7 @@ def send_messages(sock, send_sock, peer1_port, peer2_port):
             base = 0
             next_seq_num = 0
             sent_time = {}
-
+        
             while base < len(fragments):
                 # Send packets within the window
                 while next_seq_num < base + WINDOW_SIZE and next_seq_num < len(fragments):
@@ -209,6 +235,20 @@ def send_messages(sock, send_sock, peer1_port, peer2_port):
                     time.sleep(0.01)  # Small delay to reduce CPU usage
             received_ack.clear()
             print(f"Sent entire data in {len(fragments)} fragment(s).")
-
+            stop_fucking_heartbeat = False
+            # print("HEARTBEAT HAS BEEN CAHNGED to ", stop_fucking_heartbeat)
         except Exception as e:
             print(f"Error while sending: {e}")
+
+def keep_alive_sender(sock, keep_alive_interval, PEER2_IP, PEER2_PORT):
+    global stop_fucking_heartbeat, terminate, connection_state
+    while not terminate:
+        if not stop_fucking_heartbeat:
+                time.sleep(keep_alive_interval)
+                # print("Sending Keep-Alive message...")
+                sock.sendto(b"KEEP_ALIVE", (PEER2_IP, PEER2_PORT))  # Send Keep-Alive message
+                connection_alive = False
+                connection_state -= 1
+
+                if connection_state < 0:
+                    print("Connection ruined nahui :(")
